@@ -1,0 +1,1 @@
+<Application x:Class="KonveyorWpf.App"             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"             xmlns:local="clr-namespace:KonveyorWpf"             StartupUri="MainWindow.xaml">    <Application.Resources>             </Application.Resources></Application>
