@@ -1,0 +1,257 @@
+// ==============================================================================
+// Proje Adı     : Dijital İkiz (Factory I/O + S7-1200 + C# WPF SCADA)
+// Blok Adı      : FB_ConveyorDigitalTwin (FB1)
+// Dil           : SCL (Structured Control Language)
+// Hedef Donanım : Siemens SIMATIC S7-1200 CPU 1214C DC/DC/DC (TIA Portal V17/V18/V19)
+// Standart      : IEC 61131-3 & OT Anayasası
+// Açıklama      : 3D Factory I/O Sahnesi ve C# SCADA Entegrasyonlu Konveyör & Ayırıcı Kontrol Bloğu
+// ==============================================================================
+
+FUNCTION_BLOCK "FB_ConveyorDigitalTwin"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 1.0
+   VAR_INPUT 
+      // --- Donanım / Factory I/O Dijital Girişleri ---
+      di_StartButton : Bool;          // %I0.0 - Fiziksel / Panel Start Butonu (NO)
+      di_StopButton : Bool;           // %I0.1 - Fiziksel / Panel Stop Butonu (NC - Normalde Kapalı)
+      di_EmergencyStop : Bool;        // %I0.2 - Acil Durdurma Butonu / Güvenlik Rölesi (NC)
+      di_ThermalRelayOK : Bool;       // %I0.3 - Motor Termik / Sürücü Hazır Kontağı (NC)
+      di_SensorEntry : Bool;          // %I0.4 - Giriş Konveyörü Parça Algılama Fotoseli (NO)
+      di_SensorExit : Bool;           // %I0.5 - Çıkış Konveyörü Parça Fotoseli (NO)
+      di_SensorMetalSort : Bool;      // %I0.6 - Ayrılacak Parça (Metal/Kutu) Sensörü (NO)
+      di_PusherFrontLimit : Bool;     // %I0.7 - Ayırıcı Piston İleri Limit Switch (NO)
+      di_PusherBackLimit : Bool;      // %I1.0 - Ayırıcı Piston Geri Limit Switch (NC)
+   END_VAR
+
+   VAR_OUTPUT 
+      // --- Donanım / Factory I/O Dijital & Analog Çıkışları ---
+      dq_ConveyorEntry : Bool;        // %Q0.0 - Giriş Konveyör Motoru İleri
+      dq_ConveyorExit : Bool;         // %Q0.1 - Çıkış Konveyör Motoru İleri
+      dq_PusherExtend : Bool;         // %Q0.2 - Ayırıcı Piston İleri Valfi (5/2 Yay Geri Dönüşlü)
+      dq_StackLightGreen : Bool;      // %Q0.3 - Sinyal Kulesi Yeşil (Çalışıyor)
+      dq_StackLightYellow : Bool;     // %Q0.4 - Sinyal Kulesi Sarı (Beklemede / Durdu)
+      dq_StackLightRed : Bool;        // %Q0.5 - Sinyal Kulesi Kırmızı (Arıza / E-Stop)
+      dq_AlarmHorn : Bool;            // %Q0.6 - Sesli İkaz Sireni
+      aq_SetSpeedAnalog : Int;        // %QW64 - 0-10V / 0-27648 Hız Sürücü Analog Çıkışı
+   END_VAR
+
+   VAR 
+      // --- Dahili Durum ve Mantık Değişkenleri ---
+      iState : Int;                   // Durum Makinesi (0: Idle, 10: Run, 20: Sort, 30: Push, 40: Retract, 99: Fault)
+      bSafetyOK : Bool;               // Tüm Güvenlik Şartları Sağlandı mı?
+      bWatchdogFault : Bool;          // SCADA Haberleşme Kesildi Bayrağı
+      
+      // --- Pozitif Kenar (R_TRIG) Değişkenleri ---
+      bTrigEntryMem : Bool;
+      bTrigExitMem : Bool;
+      bTrigMetalMem : Bool;
+      bWatchdogPrevIn : Bool;
+
+      // --- Zamanlayıcılar (IEC Timers) ---
+      tonJamming : TON;               // Konveyörde Sıkışma / Tıkanma Zamanlayıcısı
+      tonPusherTimeout : TON;         // Piston İleri Gitme Zaman Aşımı
+      tonWatchdog : TON;              // SCADA Heartbeat Denetim Zamanlayıcısı
+      tonThermalSimulation : TON;     // Motor Sıcaklık Artış Simülasyonu
+   END_VAR
+
+   VAR_TEMP 
+      bStartTrigger : Bool;
+      bStopTrigger : Bool;
+   END_VAR
+
+BEGIN
+   // ===========================================================================
+   // 1. SCADA WATCHDOG & HEARTBEAT DENETİMİ (1000ms - 3000ms Timeout)
+   // ===========================================================================
+   // SCADA'dan gelen scada_watchdogIn biti periyodik olarak değişmelidir.
+   IF "DB_SCADA_Exchange".scada_watchdogIn <> #bWatchdogPrevIn THEN
+       #bWatchdogPrevIn := "DB_SCADA_Exchange".scada_watchdogIn;
+       #tonWatchdog(IN := FALSE, PT := T#3S); // Zamanlayıcıyı sıfırla
+       #bWatchdogFault := FALSE;
+       "DB_SCADA_Exchange".plc_watchdogEcho := "DB_SCADA_Exchange".scada_watchdogIn;
+   ELSE
+       #tonWatchdog(IN := TRUE, PT := T#3S);
+       IF #tonWatchdog.Q THEN
+           #bWatchdogFault := TRUE; // 3 saniye boyunca SCADA'dan sinyal gelmedi!
+       END_IF;
+   END_IF;
+
+   // ===========================================================================
+   // 2. GÜVENLİK VE KİLİTLEME KONTROLÜ (Safety & Interlock)
+   // ===========================================================================
+   // E-Stop donanımsal (NC) veya SCADA yazılımsal acil durdurma tetiklenmişse
+   IF (NOT #di_EmergencyStop) OR "DB_SCADA_Exchange".scada_cmdEStop THEN
+       #bSafetyOK := FALSE;
+       #iState := 99;
+       "DB_SCADA_Exchange".plc_alarmCode := 1; // Hata 1: E-Stop Devrede
+       "DB_SCADA_Exchange".plc_statusEStopActive := TRUE;
+   // Termik Röle / Sürücü Arızası (NC Açılmışsa)
+   ELSIF NOT #di_ThermalRelayOK THEN
+       #bSafetyOK := FALSE;
+       #iState := 99;
+       "DB_SCADA_Exchange".plc_alarmCode := 2; // Hata 2: Motor Termik Açtı
+       "DB_SCADA_Exchange".plc_statusEStopActive := FALSE;
+   // Watchdog İletişim Hatası
+   ELSIF #bWatchdogFault THEN
+       #bSafetyOK := FALSE;
+       #iState := 99;
+       "DB_SCADA_Exchange".plc_alarmCode := 4; // Hata 4: SCADA Watchdog Zaman Aşımı
+   ELSE
+       #bSafetyOK := TRUE;
+       "DB_SCADA_Exchange".plc_statusEStopActive := FALSE;
+   END_IF;
+
+   // Alarm Sıfırlama Mantığı (Sadece hata şartları ortadan kalktıysa ve Reset geldiyse)
+   IF "DB_SCADA_Exchange".scada_cmdResetAlarm THEN
+       IF #bSafetyOK THEN
+           #iState := 0; // IDLE durumuna dön
+           "DB_SCADA_Exchange".plc_alarmCode := 0;
+           "DB_SCADA_Exchange".plc_statusAlarm := FALSE;
+       END_IF;
+       "DB_SCADA_Exchange".scada_cmdResetAlarm := FALSE; // Komutu tüket
+   END_IF;
+
+   // ===========================================================================
+   // 3. BAŞLATMA / DURDURMA TETİKLEYİCİLERİ (Fiziksel Panel + SCADA)
+   // ===========================================================================
+   #bStartTrigger := (#di_StartButton OR "DB_SCADA_Exchange".scada_cmdStart) AND #bSafetyOK;
+   #bStopTrigger  := (NOT #di_StopButton) OR "DB_SCADA_Exchange".scada_cmdStop;
+
+   // SCADA komut bayraklarını tüket
+   IF "DB_SCADA_Exchange".scada_cmdStart THEN "DB_SCADA_Exchange".scada_cmdStart := FALSE; END_IF;
+   IF "DB_SCADA_Exchange".scada_cmdStop  THEN "DB_SCADA_Exchange".scada_cmdStop := FALSE; END_IF;
+
+   // Sayacı sıfırlama komutu
+   IF "DB_SCADA_Exchange".scada_cmdClearCount THEN
+       "DB_SCADA_Exchange".plc_pieceCountTotal := 0;
+       "DB_SCADA_Exchange".plc_pieceCountRejected := 0;
+       "DB_SCADA_Exchange".scada_cmdClearCount := FALSE;
+   END_IF;
+
+   // ===========================================================================
+   // 4. DURUM MAKİNESİ (STATE MACHINE)
+   // ===========================================================================
+   CASE #iState OF
+       0: // --- DURUM 0: BEKLEMEDE (IDLE / STOPPED) ---
+           #dq_ConveyorEntry := FALSE;
+           #dq_ConveyorExit := FALSE;
+           #dq_PusherExtend := FALSE;
+           
+           IF #bStartTrigger THEN
+               #iState := 10; // Çalışma moduna geç
+           END_IF;
+
+       10: // --- DURUM 10: ÇALIŞIYOR (RUNNING) ---
+           #dq_ConveyorEntry := TRUE;
+           #dq_ConveyorExit := TRUE;
+           #dq_PusherExtend := FALSE;
+
+           // Durdurma talebi gelirse
+           IF #bStopTrigger THEN
+               #iState := 0;
+           // Ayrılacak nesne (Metal vb.) sensöre ulaştığında
+           ELSIF #di_SensorMetalSort THEN
+               #iState := 20; // Ayırma sekansına geç
+           // Manuel piston itme talebi (SCADA manuel mod)
+           ELSIF "DB_SCADA_Exchange".scada_cmdManualPusher THEN
+               "DB_SCADA_Exchange".scada_cmdManualPusher := FALSE;
+               #iState := 30;
+           END_IF;
+
+       20: // --- DURUM 20: AYIRMA ALGILANDI (SORTING DETECT) ---
+           #dq_ConveyorEntry := TRUE;
+           #dq_ConveyorExit := TRUE;
+           #iState := 30; // Pistonu ileri sürmeye başla
+
+       30: // --- DURUM 30: PİSTON İLERİ (PUSHER EXTENDING) ---
+           #dq_PusherExtend := TRUE;
+
+           // Piston ileri limit switchine ulaştıysa VEYA 2 sn zaman aşımı olduysa
+           #tonPusherTimeout(IN := TRUE, PT := T#2S);
+           IF #di_PusherFrontLimit OR #tonPusherTimeout.Q THEN
+               #tonPusherTimeout(IN := FALSE, PT := T#2S);
+               "DB_SCADA_Exchange".plc_pieceCountRejected := "DB_SCADA_Exchange".plc_pieceCountRejected + 1;
+               #iState := 40; // Geri çekilme durumuna geç
+           END_IF;
+
+       40: // --- DURUM 40: PİSTON GERİ (PUSHER RETRACTING) ---
+           #dq_PusherExtend := FALSE;
+
+           // Piston tamamen geri limitine oturduğunda tekrar normal akışa dön
+           IF #di_PusherBackLimit OR (NOT #di_PusherFrontLimit) THEN
+               #iState := 10;
+           END_IF;
+
+       99: // --- DURUM 99: ARIZA / GÜVENLİ DURUŞ (FAULT / SAFE STOP) ---
+           #dq_ConveyorEntry := FALSE;
+           #dq_ConveyorExit := FALSE;
+           #dq_PusherExtend := FALSE;
+   END_CASE;
+
+   // ===========================================================================
+   // 5. TIKANMA / JAMMING KONTROLÜ (Sensör önünde takılı kalan ürün)
+   // ===========================================================================
+   // Konveyör çalışırken giriş sensörü 4 saniyeden uzun süre kesintisiz TRUE kalırsa
+   #tonJamming(IN := (#iState = 10) AND #di_SensorEntry, PT := T#4S);
+   IF #tonJamming.Q THEN
+       #iState := 99;
+       "DB_SCADA_Exchange".plc_alarmCode := 3; // Hata 3: Konveyörde Ürün Sıkışması (Jamming)
+   END_IF;
+
+   // ===========================================================================
+   // 6. PARÇA SAYMA & KENAR ALGILAMA (Edge Detection)
+   // ===========================================================================
+   // Çıkış sensörü pozitif kenarında toplam ürün sayısını artır
+   IF #di_SensorExit AND NOT #bTrigExitMem THEN
+       "DB_SCADA_Exchange".plc_pieceCountTotal := "DB_SCADA_Exchange".plc_pieceCountTotal + 1;
+   END_IF;
+   #bTrigExitMem := #di_SensorExit;
+
+   // ===========================================================================
+   // 7. ANALOG HIZ ÖLÇEKLENDİRME & SİMÜLASYON TELEMETRİSİ
+   // ===========================================================================
+   // Hız Sınırlandırma (0 - 1500 RPM)
+   IF "DB_SCADA_Exchange".scada_setSpeedRpm < 0 THEN
+       "DB_SCADA_Exchange".scada_setSpeedRpm := 0;
+   ELSIF "DB_SCADA_Exchange".scada_setSpeedRpm > 1500 THEN
+       "DB_SCADA_Exchange".scada_setSpeedRpm := 1500;
+   END_IF;
+
+   // Çalışma durumuna göre gerçek hız ve akım modellemesi
+   IF (#iState = 10) OR (#iState = 20) OR (#iState = 30) OR (#iState = 40) THEN
+       "DB_SCADA_Exchange".plc_actualSpeedRpm := "DB_SCADA_Exchange".scada_setSpeedRpm;
+       // Siemens Analog Çıkış Formatı (0-1500 RPM -> 0-27648 Word)
+       #aq_SetSpeedAnalog := REAL_TO_INT((INT_TO_REAL("DB_SCADA_Exchange".scada_setSpeedRpm) / 1500.0) * 27648.0);
+       // Motor Akımı Hesaplama: Boşta 1.2A + Hıza bağlı oransal akım
+       "DB_SCADA_Exchange".plc_motorCurrentAmp := 1.2 + (INT_TO_REAL("DB_SCADA_Exchange".plc_actualSpeedRpm) / 1500.0) * 3.8;
+       // Motor Sıcaklığı Yavaşça Isınır (Maks 58.5°C)
+       IF "DB_SCADA_Exchange".plc_motorTemperature < 58.5 THEN
+           "DB_SCADA_Exchange".plc_motorTemperature := "DB_SCADA_Exchange".plc_motorTemperature + 0.01;
+       END_IF;
+   ELSE
+       "DB_SCADA_Exchange".plc_actualSpeedRpm := 0;
+       #aq_SetSpeedAnalog := 0;
+       "DB_SCADA_Exchange".plc_motorCurrentAmp := 0.0;
+       // Motor Sıcaklığı Yavaşça Soğur (Min 25.0°C)
+       IF "DB_SCADA_Exchange".plc_motorTemperature > 25.0 THEN
+           "DB_SCADA_Exchange".plc_motorTemperature := "DB_SCADA_Exchange".plc_motorTemperature - 0.01;
+       END_IF;
+   END_IF;
+
+   // ===========================================================================
+   // 8. SCADA DB & ÇIKIŞ SİNYAL KULESİ GÜNCELLEMELERİ
+   // ===========================================================================
+   "DB_SCADA_Exchange".plc_statusRunning := (#iState = 10) OR (#iState = 20) OR (#iState = 30) OR (#iState = 40);
+   "DB_SCADA_Exchange".plc_statusStopped := (#iState = 0);
+   "DB_SCADA_Exchange".plc_statusAlarm := (#iState = 99);
+   "DB_SCADA_Exchange".plc_statusSensorEntry := #di_SensorEntry;
+   "DB_SCADA_Exchange".plc_statusSensorExit := #di_SensorExit;
+   "DB_SCADA_Exchange".plc_statusPusherExtended := #di_PusherFrontLimit;
+
+   // Sinyal Kulesi Çıkışları
+   #dq_StackLightGreen  := "DB_SCADA_Exchange".plc_statusRunning AND NOT "DB_SCADA_Exchange".plc_statusAlarm;
+   #dq_StackLightYellow := "DB_SCADA_Exchange".plc_statusStopped AND NOT "DB_SCADA_Exchange".plc_statusAlarm;
+   #dq_StackLightRed    := "DB_SCADA_Exchange".plc_statusAlarm;
+   #dq_AlarmHorn        := "DB_SCADA_Exchange".plc_statusAlarm;
+
+END_FUNCTION_BLOCK

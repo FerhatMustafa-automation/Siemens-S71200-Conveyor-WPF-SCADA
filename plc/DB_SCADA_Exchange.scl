@@ -1,0 +1,77 @@
+// ==============================================================================
+// Proje Adı     : Dijital İkiz (Factory I/O + S7-1200 + C# WPF SCADA)
+// Blok Adı      : DB_SCADA_Exchange (DB1)
+// Dil           : SCL (Structured Control Language)
+// Hedef Donanım : Siemens SIMATIC S7-1200 CPU 1214C DC/DC/DC (TIA Portal V17/V18/V19)
+// Standart      : IEC 61131-3 & OT Anayasası
+// Açıklama      : C# S7NetPlus SCADA haberleşmesi için mutlak ofsetli Non-Optimized DB.
+// ==============================================================================
+
+DATA_BLOCK "DB_SCADA_Exchange"
+{ S7_Optimized_Access := 'FALSE' } // ZORUNLU: C# mutlak byte/bit erişimi için Optimized Access KAPALI
+VERSION : 1.0
+NON_RETAIN
+   STRUCT 
+      // -------------------------------------------------------------------------
+      // 1. SCADA -> PLC KONTROL KOMUTLARI (Byte 0)
+      // -------------------------------------------------------------------------
+      scada_cmdStart : Bool;          // Offset DBX0.0 - SCADA Konveyör Başlat Komutu
+      scada_cmdStop : Bool;           // Offset DBX0.1 - SCADA Konveyör Durdur Komutu
+      scada_cmdResetAlarm : Bool;     // Offset DBX0.2 - SCADA Alarm Sıfırlama Komutu
+      scada_cmdEStop : Bool;          // Offset DBX0.3 - SCADA Yazılımsal Acil Durdurma
+      scada_cmdManualPusher : Bool;   // Offset DBX0.4 - Manuel Ayırıcı Piston Tetikleme
+      scada_cmdAutoMode : Bool;       // Offset DBX0.5 - Otomatik / Manuel Mod Seçimi
+      scada_cmdClearCount : Bool;     // Offset DBX0.6 - Parça Sayacını Sıfırla
+      scada_watchdogIn : Bool;        // Offset DBX0.7 - SCADA'dan gelen Heartbeat Toggle Biti
+
+      // -------------------------------------------------------------------------
+      // 2. PLC -> SCADA DURUM VE GERİ BESLEME BİTLERİ (Byte 1)
+      // -------------------------------------------------------------------------
+      plc_statusRunning : Bool;       // Offset DBX1.0 - Sistem Çalışıyor Durumu
+      plc_statusStopped : Bool;       // Offset DBX1.1 - Sistem Durdu Durumu
+      plc_statusAlarm : Bool;         // Offset DBX1.2 - Aktif Alarm / Arıza Bayrağı
+      plc_statusEStopActive : Bool;   // Offset DBX1.3 - Acil Stop Devrede (Fiziksel veya SCADA)
+      plc_statusSensorEntry : Bool;   // Offset DBX1.4 - Giriş Sensörü Parça Algıladı
+      plc_statusSensorExit : Bool;    // Offset DBX1.5 - Çıkış Sensörü Parça Algıladı
+      plc_statusPusherExtended : Bool;// Offset DBX1.6 - Ayırıcı Piston İleride Sensörü
+      plc_watchdogEcho : Bool;        // Offset DBX1.7 - PLC Watchdog Yanıt / Echo Biti
+
+      // -------------------------------------------------------------------------
+      // 3. PARAMETRELER VE TELEMETRİ VERİLERİ (Byte 2 - Byte 23)
+      // -------------------------------------------------------------------------
+      scada_setSpeedRpm : Int;        // Offset DBW2  - SCADA'dan İstenen Hedef Hız (0 - 1500 RPM)
+      plc_actualSpeedRpm : Int;       // Offset DBW4  - PLC/Sürücü Gerçek Hız Geri Beslemesi
+      plc_pieceCountTotal : DInt;     // Offset DBD6  - Toplam Geçen Parça Sayısı (DINT: 32-bit)
+      plc_pieceCountRejected : DInt;  // Offset DBD10 - Hatalı/Ayrılan Parça Sayısı (DINT)
+      plc_motorCurrentAmp : Real;     // Offset DBD14 - Motor Anlık Akımı (Amper: REAL)
+      plc_motorTemperature : Real;    // Offset DBD18 - Motor Sıcaklığı (°C: REAL)
+      plc_alarmCode : Int;            // Offset DBW22 - Hata Kodu (0: Normal, 1: E-Stop, 2: Termik, 3: Jamming, 4: Watchdog)
+
+   END_STRUCT;
+BEGIN
+   scada_cmdStart := FALSE;
+   scada_cmdStop := FALSE;
+   scada_cmdResetAlarm := FALSE;
+   scada_cmdEStop := FALSE;
+   scada_cmdManualPusher := FALSE;
+   scada_cmdAutoMode := TRUE;
+   scada_cmdClearCount := FALSE;
+   scada_watchdogIn := FALSE;
+
+   plc_statusRunning := FALSE;
+   plc_statusStopped := TRUE;
+   plc_statusAlarm := FALSE;
+   plc_statusEStopActive := FALSE;
+   plc_statusSensorEntry := FALSE;
+   plc_statusSensorExit := FALSE;
+   plc_statusPusherExtended := FALSE;
+   plc_watchdogEcho := FALSE;
+
+   scada_setSpeedRpm := 1000;
+   plc_actualSpeedRpm := 0;
+   plc_pieceCountTotal := 0;
+   plc_pieceCountRejected := 0;
+   plc_motorCurrentAmp := 0.0;
+   plc_motorTemperature := 25.0;
+   plc_alarmCode := 0;
+END_DATA_BLOCK
