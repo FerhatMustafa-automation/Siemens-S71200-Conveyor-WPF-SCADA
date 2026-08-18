@@ -6,7 +6,7 @@
 [![.NET 8](https://img.shields.io/badge/.NET-8.0_WPF-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com)
 [![S7NetPlus](https://img.shields.io/badge/Driver-S7NetPlus_v0.20-0078D7?style=for-the-badge)](https://github.com/S7NetPlus/s7netplus)
 [![MYK Seviye 5](https://img.shields.io/badge/Sertifikasyon-MYK_Seviye_5_Uyumlu-green?style=for-the-badge)](https://myk.gov.tr)
-[![Lisans](https://img.shields.io/badge/License-MIT-blue.style=for-the-badge)](LICENSE)
+[![Lisans](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 ---
 
